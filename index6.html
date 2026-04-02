@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Labyrinth + Maze ASCII Test Harness</title>
+  <style>
+    :root {
+      --bg: #111;
+      --panel: #1a1a1a;
+      --text: #e8e8e8;
+      --wall: #666;
+      --labyrinth: #4fc3f7;
+      --maze: #ffb74d;
+      --connector: #ba68c8;
+      --entry: #81c784;
+      --exit: #e57373;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Consolas, Menlo, Monaco, monospace;
+      display: flex;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .panel {
+      width: min(100%, 980px);
+      background: var(--panel);
+      padding: 16px;
+      border-radius: 12px;
+      box-sizing: border-box;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    label {
+      font-size: 14px;
+    }
+
+    input {
+      width: 70px;
+      background: #111;
+      color: var(--text);
+      border: 1px solid #3a3a3a;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font: inherit;
+    }
+
+    button {
+      background: #262626;
+      color: var(--text);
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    button:hover { background: #303030; }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      margin-bottom: 12px;
+      font-size: 14px;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+
+    #grid {
+      white-space: pre;
+      font-size: 14px;
+      line-height: 1;
+      background: #000;
+      padding: 12px;
+      border-radius: 10px;
+      overflow: auto;
+      min-height: 420px;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="controls">
+      <label>Width <input id="w" type="number" min="21" step="2" value="100" /></label>
+      <label>Height <input id="h" type="number" min="21" step="2" value="50" /></label>
+      <label>Core Radius <input id="core" type="number" min="5" step="1" value="10" /></label>
+      <label>Speed <input id="speed" type="number" min="1" max="10" step="1" value="10" /></label>
+      <label>Intelligence <input id="intelligence" type="number" min="1" max="10" step="1" value="9" /></label>
+      <button id="regenBtn">Regenerate</button>
+    </div>
+
+    <div class="legend">
+      <span><i class="swatch" style="background: var(--wall)"></i> Wall</span>
+      <span><i class="swatch" style="background: var(--labyrinth)"></i> Labyrinth</span>
+      <span><i class="swatch" style="background: var(--connector)"></i> Connector</span>
+      <span><i class="swatch" style="background: var(--maze)"></i> Maze Core</span>
+      <span><i class="swatch" style="background: var(--entry)"></i> Entry</span>
+      <span><i class="swatch" style="background: var(--exit)"></i> Exit</span>
+      <span><i class="swatch" style="background: #fff"></i> Mouse</span>
+    </div>
+
+    <div id="grid"></div>
+  </div>
+
+  <script>
+    const WALL = '#';
+    const LAB = '.';
+    const MAZE = ':';
+    const CONN = '+';
+    const ENTRY = 'S';
+    const EXIT = 'E';
+    const MOUSE = 'm';
+
+    let grid = [];
+    let mousePos = null;
+    let currentRunId = 0;
+    let explorerState = null;
+
+    const gridEl = document.getElementById('grid');
+    const regenBtn = document.getElementById('regenBtn');
+    const widthInput = document.getElementById('w');
+    const heightInput = document.getElementById('h');
+    const coreInput = document.getElementById('core');
+
+    function normalizeOdd(n, min = 21) {
+      n = Math.max(min, parseInt(n, 10) || min);
+      return (n % 2 === 0) ? n + 1 : n;
+    }
+
+    function computeMaxCoreRadius(w, h) {
+      const cx = Math.floor(w / 2);
+      const cy = Math.floor(h / 2);
+      const outerRadius = Math.min(cx, cy) - 2;
+      // Need room for: maze core + moat/walls + labyrinth shell + approach target.
+      // This keeps all derived radii safely inside the viewport.
+      return Math.max(5, Math.floor((outerRadius - 6) / 2));
+    }
+
+    function sanitizeInputs() {
+      let w = normalizeOdd(widthInput.value, 21);
+      let h = normalizeOdd(heightInput.value, 21);
+      let maxCore = computeMaxCoreRadius(w, h);
+      let core = Math.max(5, Math.min(maxCore, parseInt(coreInput.value, 10) || 8));
+
+      widthInput.value = w;
+      heightInput.value = h;
+      coreInput.max = maxCore;
+      coreInput.value = core;
+
+      return { w, h, coreRadius: core, maxCore };
+    }
+
+    function makeGrid(w, h, fill = WALL) {
+      return Array.from({ length: h }, () => Array(w).fill(fill));
+    }
+
+    function inBounds(x, y, w, h) {
+      return x >= 0 && y >= 0 && x < w && y < h;
+    }
+
+    function carveCell(grid, x, y, ch) {
+      if (inBounds(x, y, grid[0].length, grid.length)) grid[y][x] = ch;
+    }
+
+    function shuffle(arr) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    }
+
+    function key(x, y) {
+      return `${x},${y}`;
+    }
+
+    function paintHtml() {
+      const colors = {
+        [WALL]: 'var(--wall)',
+        [LAB]: 'var(--labyrinth)',
+        [CONN]: 'var(--connector)',
+        [MAZE]: 'var(--maze)',
+        [ENTRY]: 'var(--entry)',
+        [EXIT]: 'var(--exit)'
+      };
+
+      let html = '';
+      for (let y = 0; y < grid.length; y++) {
+        for (let x = 0; x < grid[0].length; x++) {
+          if (mousePos && mousePos[0] === x && mousePos[1] === y) {
+            html += `<span style="color:#fff">${MOUSE}</span>`;
+          } else {
+            const ch = grid[y][x];
+            html += `<span style="color:${colors[ch] || 'var(--wall)'}">${ch}</span>`;
+          }
+        }
+        html += '\n';
+      }
+      gridEl.innerHTML = html;
+    }
+
+    function bfsDistances(start, passableFn) {
+      const q = [start];
+      const dist = new Map();
+      dist.set(key(start[0], start[1]), 0);
+
+      while (q.length) {
+        const [x, y] = q.shift();
+        const base = dist.get(key(x, y));
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = x + dx;
+          const ny = y + dy;
+          const k = key(nx, ny);
+          if (!inBounds(nx, ny, grid[0].length, grid.length)) continue;
+          if (!passableFn(nx, ny)) continue;
+          if (dist.has(k)) continue;
+          dist.set(k, base + 1);
+          q.push([nx, ny]);
+        }
+      }
+
+      return dist;
+    }
+
+    function carveRandomizedLabyrinth(grid, cx, cy, outerRadius, innerRadius) {
+      let candidates = [];
+      for (let x = 1; x < grid[0].length - 1; x += 2) {
+        candidates.push([x, 1]);
+        candidates.push([x, grid.length - 2]);
+      }
+      for (let y = 3; y < grid.length - 3; y += 2) {
+        candidates.push([1, y]);
+        candidates.push([grid[0].length - 2, y]);
+      }
+
+      const start = candidates[Math.floor(Math.random() * candidates.length)];
+      const target = [cx, cy - innerRadius - 1];
+
+      let x = start[0];
+      let y = start[1];
+      carveCell(grid, x, y, LAB);
+      const path = [[x, y]];
+
+      while (x !== target[0] || y !== target[1]) {
+        const options = [];
+        if (x < target[0]) options.push([x + 1, y, 3]);
+        if (x > target[0]) options.push([x - 1, y, 3]);
+        if (y < target[1]) options.push([x, y + 1, 3]);
+        if (y > target[1]) options.push([x, y - 1, 3]);
+
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!inBounds(nx, ny, grid[0].length, grid.length)) continue;
+          if (nx <= 0 || ny <= 0 || nx >= grid[0].length - 1 || ny >= grid.length - 1) continue;
+          options.push([nx, ny, 1]);
+        }
+
+        const weighted = [];
+        for (const option of options) {
+          for (let i = 0; i < option[2]; i++) weighted.push(option);
+        }
+        shuffle(weighted);
+
+        let moved = false;
+        for (const [nx, ny] of weighted) {
+          const already = grid[ny][nx] !== WALL;
+          const manhattan = Math.abs(nx - target[0]) + Math.abs(ny - target[1]);
+          const curManhattan = Math.abs(x - target[0]) + Math.abs(y - target[1]);
+          const acceptableWander = Math.random() < 0.28;
+          if (already) continue;
+          if (manhattan <= curManhattan || acceptableWander) {
+            x = nx;
+            y = ny;
+            carveCell(grid, x, y, LAB);
+            path.push([x, y]);
+            moved = true;
+            break;
+          }
+        }
+
+        if (!moved) {
+          const directX = x + Math.sign(target[0] - x);
+          const directY = y + Math.sign(target[1] - y);
+          if (x !== target[0] && inBounds(directX, y, grid[0].length, grid.length) && grid[y][directX] === WALL) {
+            x = directX;
+          } else if (y !== target[1] && inBounds(x, directY, grid[0].length, grid.length) && grid[directY][x] === WALL) {
+            y = directY;
+          } else {
+            break;
+          }
+          carveCell(grid, x, y, LAB);
+          path.push([x, y]);
+        }
+      }
+
+      return { start, innerGate: [x, y], path };
+    }
+
+    function carveMazeCore(grid, x0, y0, size) {
+      const visited = new Set();
+      const dirs = [[2,0],[-2,0],[0,2],[0,-2]];
+
+      function insideCore(x, y) {
+        return x > x0 && y > y0 && x < x0 + size - 1 && y < y0 + size - 1;
+      }
+
+      function dfs(x, y) {
+        visited.add(key(x, y));
+        carveCell(grid, x, y, MAZE);
+        for (const [dx, dy] of shuffle([...dirs])) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!insideCore(nx, ny)) continue;
+          if (visited.has(key(nx, ny))) continue;
+          carveCell(grid, x + dx / 2, y + dy / 2, MAZE);
+          dfs(nx, ny);
+        }
+      }
+
+      const sx = x0 + 1 + (Math.floor(Math.random() * Math.max(1, Math.floor((size - 2) / 2))) * 2);
+      const sy = y0 + 1 + (Math.floor(Math.random() * Math.max(1, Math.floor((size - 2) / 2))) * 2);
+      dfs(sx, sy);
+    }
+
+    function findCoreBoundaryPoints(cx, cy, coreRadius) {
+      const points = [];
+      for (let x = cx - coreRadius; x <= cx + coreRadius; x++) {
+        points.push([x, cy - coreRadius]);
+        points.push([x, cy + coreRadius]);
+      }
+      for (let y = cy - coreRadius + 1; y <= cy + coreRadius - 1; y++) {
+        points.push([cx - coreRadius, y]);
+        points.push([cx + coreRadius, y]);
+      }
+      return shuffle(points);
+    }
+
+    function carveConnector(grid, start, end) {
+      let x = start[0];
+      let y = start[1];
+      while (x !== end[0] || y !== end[1]) {
+        if (grid[y][x] === WALL) carveCell(grid, x, y, CONN);
+        const dx = Math.sign(end[0] - x);
+        const dy = Math.sign(end[1] - y);
+        if ((dx !== 0 && dy !== 0 && Math.random() < 0.5) || dy === 0) x += dx;
+        else y += dy;
+      }
+      if (grid[y][x] === WALL) carveCell(grid, x, y, CONN);
+    }
+
+    function carveLabyrinthRing(grid, cx, cy, outerR, innerR) {
+      const path = [];
+
+      function pushCell(x, y) {
+        if (!inBounds(x, y, grid[0].length, grid.length)) return;
+        carveCell(grid, x, y, LAB);
+        const last = path[path.length - 1];
+        if (!last || last[0] !== x || last[1] !== y) {
+          path.push([x, y]);
+        }
+      }
+
+      let minX = cx - outerR;
+      let maxX = cx + outerR;
+      let minY = cy - outerR;
+      let maxY = cy + outerR;
+
+      let x = minX;
+      let y = minY;
+      pushCell(x, y);
+
+      while ((maxX - minX) > innerR * 2 && (maxY - minY) > innerR * 2) {
+        while (x < maxX) { x++; pushCell(x, y); }
+        while (y < maxY) { y++; pushCell(x, y); }
+        while (x > minX) { x--; pushCell(x, y); }
+        while (y > minY + 2) { y--; pushCell(x, y); }
+
+        minX += 2;
+        maxX -= 2;
+        minY += 2;
+        maxY -= 2;
+
+        if (minX > maxX || minY > maxY) break;
+
+        while (x < minX) { x++; pushCell(x, y); }
+        while (y < minY) { y++; pushCell(x, y); }
+        pushCell(x, y);
+      }
+
+      if (path.length === 0) {
+        pushCell(cx, cy - outerR);
+      }
+
+      return {
+        entry: path[0],
+        exit: path[path.length - 1],
+        path
+      };
+    }
+
+    function placeExitFarFromStart(coreCells, start) {
+      const dist = bfsDistances(start, (x, y) => grid[y][x] !== WALL);
+      let best = null;
+      let bestD = -1;
+      for (const [x, y] of coreCells) {
+        const d = dist.get(key(x, y));
+        if (d != null && d > bestD) {
+          bestD = d;
+          best = [x, y];
+        }
+      }
+      return best;
+    }
+
+    function collectCoreCells() {
+      const cells = [];
+      for (let y = 0; y < grid.length; y++) {
+        for (let x = 0; x < grid[0].length; x++) {
+          if (grid[y][x] === MAZE) cells.push([x, y]);
+        }
+      }
+      return cells;
+    }
+
+    function getNeighbors(x, y) {
+      const out = [];
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (!inBounds(nx, ny, grid[0].length, grid.length)) continue;
+        if (grid[ny][nx] === WALL) continue;
+        out.push([nx, ny]);
+      }
+      return out;
+    }
+
+    function createExplorer(start, exit) {
+      return {
+        start: [...start],
+        exit: [...exit],
+        stack: [[...start]],
+        visited: new Set([key(start[0], start[1])]),
+        deadEnds: new Set(),
+        lastDir: null,
+        solved: false,
+        finished: false
+      };
+    }
+
+    function getIntelligence() {
+      return Math.max(1, Math.min(10, parseInt(document.getElementById('intelligence').value, 10) || 5));
+    }
+
+    function directionBetween(from, to) {
+      return [Math.sign(to[0] - from[0]), Math.sign(to[1] - from[1])];
+    }
+
+    function sameDir(a, b) {
+      return !!a && !!b && a[0] === b[0] && a[1] === b[1];
+    }
+
+    function reverseDir(a, b) {
+      return !!a && !!b && a[0] === -b[0] && a[1] === -b[1];
+    }
+
+    function scoreMove(current, next, state) {
+      const intelligence = getIntelligence();
+      const dir = directionBetween(current, next);
+      let score = Math.random() * 2;
+
+      if (state.lastDir) {
+        if (sameDir(dir, state.lastDir)) score += intelligence * 1.6;
+        if (reverseDir(dir, state.lastDir)) score -= intelligence * 2.2;
+      }
+
+      if (state.deadEnds.has(key(next[0], next[1]))) {
+        score -= intelligence * 3.0;
+      }
+
+      const curDist = Math.abs(current[0] - state.exit[0]) + Math.abs(current[1] - state.exit[1]);
+      const nextDist = Math.abs(next[0] - state.exit[0]) + Math.abs(next[1] - state.exit[1]);
+      score += (curDist - nextDist) * (0.25 * intelligence);
+
+      const onward = getNeighbors(next[0], next[1]).filter(([nx, ny]) => !state.visited.has(key(nx, ny))).length;
+      score += onward * (0.12 * intelligence);
+
+      return score;
+    }
+
+    function explorerStep(state) {
+      if (state.finished) return 'finished';
+
+      const current = state.stack[state.stack.length - 1];
+      const [x, y] = current;
+      mousePos = [x, y];
+
+      if (x === state.exit[0] && y === state.exit[1]) {
+        state.solved = true;
+        state.finished = true;
+        return 'solved';
+      }
+
+      const candidates = getNeighbors(x, y).filter(([nx, ny]) => !state.visited.has(key(nx, ny)));
+
+      if (candidates.length > 0) {
+        const ranked = candidates
+          .map(next => ({ next, score: scoreMove(current, next, state) }))
+          .sort((a, b) => b.score - a.score);
+
+        const next = ranked[0].next;
+        state.visited.add(key(next[0], next[1]));
+        state.stack.push(next);
+        state.lastDir = directionBetween(current, next);
+        mousePos = [...next];
+        return 'forward';
+      }
+
+      state.deadEnds.add(key(x, y));
+
+      if (state.stack.length > 1) {
+        const from = state.stack.pop();
+        const back = state.stack[state.stack.length - 1];
+        state.lastDir = directionBetween(from, back);
+        mousePos = [...back];
+        return 'backtrack';
+      }
+
+      state.finished = true;
+      return 'stuck';
+    }
+
+    function generateLevel() {
+      const { w, h, coreRadius } = sanitizeInputs();
+
+      grid = makeGrid(w, h, WALL);
+      const cx = Math.floor(w / 2);
+      const cy = Math.floor(h / 2);
+      const outerRadius = Math.min(cx, cy) - 2;
+      const coreSize = coreRadius * 2 + 1;
+      const coreX0 = cx - coreRadius;
+      const coreY0 = cy - coreRadius;
+
+      // All surrounding rings are derived from available outer radius so they never
+      // extend off-screen or collapse into each other.
+      const labyrinthInner = coreRadius + 2;
+      const labyrinthOuter = Math.max(labyrinthInner + 2, Math.min(coreRadius + 8, outerRadius - 2));
+      const approachInnerRadius = Math.max(labyrinthOuter + 1, Math.min(labyrinthOuter + 4, outerRadius - 1));
+
+      const approach = carveRandomizedLabyrinth(grid, cx, cy, outerRadius, approachInnerRadius);
+      const labyrinth = carveLabyrinthRing(grid, cx, cy, labyrinthOuter, labyrinthInner);
+      carveConnector(grid, approach.innerGate, labyrinth.entry);
+
+      carveMazeCore(grid, coreX0, coreY0, coreSize);
+
+      const boundaryCandidates = findCoreBoundaryPoints(cx, cy, coreRadius)
+        .filter(([x, y]) => grid[y] && grid[y][x] === MAZE);
+
+      const target = boundaryCandidates.length
+        ? boundaryCandidates[Math.floor(Math.random() * boundaryCandidates.length)]
+        : [cx, cy];
+
+      carveConnector(grid, labyrinth.exit, target);
+
+      const start = approach.start;
+      carveCell(grid, start[0], start[1], ENTRY);
+
+      const coreCells = collectCoreCells();
+      const exit = (coreCells.length > 0)
+        ? (placeExitFarFromStart(coreCells, start) || coreCells[Math.floor(Math.random() * coreCells.length)])
+        : [cx, cy];
+      carveCell(grid, exit[0], exit[1], EXIT);
+
+      mousePos = [...start];
+      explorerState = createExplorer(start, exit);
+      paintHtml();
+    }
+
+    function getRunDelayMs() {
+      const speed = Math.max(1, Math.min(10, parseInt(document.getElementById('speed').value, 10) || 5));
+      const startMs = 750;
+      const endMs = 10;
+      const delay = startMs - ((speed - 1) * ((startMs - endMs) / 9));
+      return Math.max(8, delay);
+    }
+
+    async function runMouse() {
+      const myRunId = ++currentRunId;
+
+      while (true) {
+        if (myRunId !== currentRunId) return;
+        const result = explorerStep(explorerState);
+        paintHtml();
+
+        if (result === 'solved') {
+          await new Promise(r => setTimeout(r, 250));
+          if (myRunId !== currentRunId) return;
+          generateLevel();
+          runMouse();
+          return;
+        }
+
+        if (result === 'stuck' || result === 'finished') {
+          await new Promise(r => setTimeout(r, 250));
+          if (myRunId !== currentRunId) return;
+          generateLevel();
+          runMouse();
+          return;
+        }
+
+        await new Promise(r => setTimeout(r, getRunDelayMs()));
+      }
+    }
+
+    function restart() {
+      currentRunId++;
+      generateLevel();
+      runMouse();
+    }
+
+    regenBtn.addEventListener('click', restart);
+    widthInput.addEventListener('change', sanitizeInputs);
+    heightInput.addEventListener('change', sanitizeInputs);
+    coreInput.addEventListener('change', sanitizeInputs);
+    sanitizeInputs();
+    restart();
+  </script>
+</body>
+</html>
