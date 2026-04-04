@@ -100,7 +100,6 @@
       overflow: visible;
       min-height: 0;
     }
-
   </style>
 </head>
 <body>
@@ -109,9 +108,18 @@
       <label>Width <input id="w" type="number" min="21" step="2" value="100" /></label>
       <label>Height <input id="h" type="number" min="21" step="2" value="50" /></label>
       <label>Core Radius <input id="core" type="number" min="5" step="1" value="12" /></label>
+      <label>Lab Depth <input id="labDepth" type="number" min="1" max="7" step="1" value="4" /></label>
       <label>Speed <input id="speed" type="number" min="1" max="10" step="1" value="8" /></label>
       <label>Intelligence <input id="intelligence" type="number" min="1" max="10" step="1" value="9" /></label>
       <button id="regenBtn">Regenerate</button>
+    </div>
+
+    <div class="stats" id="stats" style="display:flex; flex-wrap:wrap; gap:12px 18px; margin-bottom:12px; font-size:14px;">
+      <span>Iteration <strong id="iterationCount">0</strong>/100</span>
+      <span>Elapsed <strong id="elapsedTime">00:00:000</strong></span>
+      <span>Best Time <strong id="bestTime">--:--:---</strong></span>
+      <span>Last Result <strong id="lastResult">—</strong></span>
+      <span>Status <strong id="runStatus">Running</strong></span>
     </div>
 
     <div class="legend">
@@ -146,6 +154,68 @@
     const widthInput = document.getElementById('w');
     const heightInput = document.getElementById('h');
     const coreInput = document.getElementById('core');
+    const labDepthInput = document.getElementById('labDepth');
+    const iterationEl = document.getElementById('iterationCount');
+    const elapsedEl = document.getElementById('elapsedTime');
+    const bestTimeEl = document.getElementById('bestTime');
+    const lastResultEl = document.getElementById('lastResult');
+    const runStatusEl = document.getElementById('runStatus');
+
+    const MAX_ITERATIONS = 100;
+    let iterationCount = 0;
+    let mapStartTime = 0;
+    let bestTimeMs = null;
+    let elapsedTimer = null;
+    let isSessionComplete = false;
+
+    function formatElapsed(ms) {
+      const totalMs = Math.max(0, Math.floor(ms || 0));
+      const minutes = Math.floor(totalMs / 60000);
+      const seconds = Math.floor((totalMs % 60000) / 1000);
+      const millis = totalMs % 1000;
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(millis).padStart(3, '0')}`;
+    }
+
+    function updateElapsedDisplay() {
+      if (!mapStartTime) {
+        elapsedEl.textContent = '00:00:000';
+        return;
+      }
+      elapsedEl.textContent = formatElapsed(Date.now() - mapStartTime);
+    }
+
+    function startMapTimer() {
+      mapStartTime = Date.now();
+      updateElapsedDisplay();
+      if (elapsedTimer) clearInterval(elapsedTimer);
+      elapsedTimer = setInterval(updateElapsedDisplay, 43);
+    }
+
+    function stopMapTimer() {
+      if (elapsedTimer) {
+        clearInterval(elapsedTimer);
+        elapsedTimer = null;
+      }
+      updateElapsedDisplay();
+    }
+
+    function updateStats() {
+      iterationEl.textContent = String(iterationCount);
+      bestTimeEl.textContent = bestTimeMs == null ? '--:--:---' : formatElapsed(bestTimeMs);
+      runStatusEl.textContent = isSessionComplete ? 'Complete' : 'Running';
+    }
+
+    function finalizeRun(resultLabel) {
+      stopMapTimer();
+      lastResultEl.textContent = resultLabel;
+      const elapsed = mapStartTime ? (Date.now() - mapStartTime) : null;
+      if (resultLabel === 'Solved' && elapsed != null) {
+        if (bestTimeMs == null || elapsed < bestTimeMs) {
+          bestTimeMs = elapsed;
+        }
+      }
+      updateStats();
+    }
 
     function normalizeOdd(n, min = 21) {
       n = Math.max(min, parseInt(n, 10) || min);
@@ -156,8 +226,6 @@
       const cx = Math.floor(w / 2);
       const cy = Math.floor(h / 2);
       const outerRadius = Math.min(cx, cy) - 2;
-      // Need room for: maze core + moat/walls + labyrinth shell + approach target.
-      // This keeps all derived radii safely inside the viewport.
       return Math.max(5, Math.floor((outerRadius - 6) / 2));
     }
 
@@ -374,11 +442,109 @@
       if (grid[y][x] === WALL) carveCell(grid, x, y, CONN);
     }
 
-    function carveLabyrinthRing(grid, cx, cy, outerR, innerR) {
-      const path = [];
+    function getLabDepth() {
+      return Math.max(1, Math.min(7, parseInt(labDepthInput.value, 10) || 4));
+    }
 
-      function pushCell(x, y) {
-        if (!inBounds(x, y, grid[0].length, grid.length)) return;
+    function carveLabyrinthRing(grid, cx, cy, outerR, innerR) {
+      const w = grid[0].length;
+      const h = grid.length;
+      const labDepth = getLabDepth();
+
+      const outerRX = Math.max(outerR, Math.floor((w / 2) - 3));
+      const outerRY = Math.max(innerR + 4, Math.min(outerR, Math.floor((h / 2) - 3)));
+      const innerRX = Math.max(innerR + 2, Math.floor(outerRX * Math.max(0.22, 0.42 - labDepth * 0.02)));
+      const innerRY = Math.max(innerR, Math.floor(outerRY * Math.max(0.50, 0.70 - labDepth * 0.015)));
+
+      function ellipseNorm(x, y, rx, ry) {
+        const dx = x - cx;
+        const dy = y - cy;
+        return ((dx * dx) / (rx * rx)) + ((dy * dy) / (ry * ry));
+      }
+
+      function shellProgress(x, y) {
+        const outerNorm = ellipseNorm(x, y, outerRX, outerRY);
+        const innerNorm = ellipseNorm(x, y, innerRX, innerRY);
+        const outerGap = Math.max(0, 1 - outerNorm);
+        const innerGap = Math.max(0, innerNorm - 1);
+        const total = outerGap + innerGap;
+        if (total <= 0.0001) return 0.5;
+        return outerGap / total;
+      }
+
+      function inShell(x, y) {
+        if (!inBounds(x, y, w, h)) return false;
+        if (x <= 1 || y <= 1 || x >= w - 2 || y >= h - 2) return false;
+        const outerNorm = ellipseNorm(x, y, outerRX, outerRY);
+        const innerNorm = ellipseNorm(x, y, innerRX, innerRY);
+        return outerNorm <= 1 && innerNorm >= 1;
+      }
+
+      function nearInnerBoundary(x, y) {
+        const innerNorm = ellipseNorm(x, y, innerRX, innerRY);
+        return innerNorm >= 0.94 && innerNorm <= 1.12;
+      }
+
+      function outerCandidates() {
+        const pts = [];
+        for (let y = 2; y < h - 2; y++) {
+          for (let x = 2; x < w - 2; x++) {
+            if (!inShell(x, y)) continue;
+            const outerNorm = ellipseNorm(x, y, outerRX, outerRY);
+            if (outerNorm >= 0.82) pts.push([x, y]);
+          }
+        }
+        return shuffle(pts);
+      }
+
+      function shellCandidatesForBand(minP, maxP) {
+        const pts = [];
+        for (let y = 2; y < h - 2; y++) {
+          for (let x = 2; x < w - 2; x++) {
+            if (!inShell(x, y)) continue;
+            const p = shellProgress(x, y);
+            if (p >= minP && p <= maxP) pts.push([x, y]);
+          }
+        }
+        return shuffle(pts);
+      }
+
+      function pickSpreadWaypoint(pool, prior, minManhattan) {
+        for (const p of pool) {
+          if (!prior) return p;
+          const md = Math.abs(p[0] - prior[0]) + Math.abs(p[1] - prior[1]);
+          if (md >= minManhattan) return p;
+        }
+        return pool[0] || null;
+      }
+
+      function labNeighborCount(x, y) {
+        let n = 0;
+        for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (!inBounds(nx, ny, w, h)) continue;
+          if (grid[ny][nx] === LAB) n++;
+        }
+        return n;
+      }
+
+      function wouldCauseCrowding(x, y, prev) {
+        let nearby = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx;
+            const ny = y + dy;
+            if (!inBounds(nx, ny, w, h)) continue;
+            if (prev && nx === prev[0] && ny === prev[1]) continue;
+            if (grid[ny][nx] === LAB) nearby++;
+          }
+        }
+        return nearby >= 2;
+      }
+
+      function carvePoint(path, x, y) {
         carveCell(grid, x, y, LAB);
         const last = path[path.length - 1];
         if (!last || last[0] !== x || last[1] !== y) {
@@ -386,67 +552,185 @@
         }
       }
 
-      function carveLine(x1, y1, x2, y2) {
-        let x = x1;
-        let y = y1;
-        pushCell(x, y);
-        while (x !== x2 || y !== y2) {
-          if (x < x2) x++;
-          else if (x > x2) x--;
-          else if (y < y2) y++;
-          else if (y > y2) y--;
-          pushCell(x, y);
+      function erasePath(path) {
+        for (const [x, y] of path) {
+          if (grid[y][x] === LAB) grid[y][x] = WALL;
         }
-        return [x, y];
       }
 
-      // Build a more interesting spiral by varying the entry side and
-      // intentionally offsetting each inward turn so it reads less like a
-      // perfect square buffer and more like a committed winding structure.
-      let minX = cx - outerR;
-      let maxX = cx + outerR;
-      let minY = cy - outerR;
-      let maxY = cy + outerR;
+      const shellWidthHint = Math.max(8, outerRX - innerRX);
+      const shellHeightHint = Math.max(6, outerRY - innerRY);
+      const spreadBase = Math.max(10, Math.floor((shellWidthHint * 1.35) + (shellHeightHint * 0.55)));
+      const outerHoldBias = 2.0 + (labDepth * 0.75);
+      const innerPenaltyBias = 1.4 + (labDepth * 0.85);
+      const midBandBonus = 1.25 + (labDepth * 0.2);
+      const sameDirBonus = 2.2 + (labDepth * 0.2);
+      const targetPull = Math.max(1.0, 1.85 - labDepth * 0.07);
+      const futureSpaceBonus = 0.28 + (labDepth * 0.035);
+      const minWaypointsBeforeInner = Math.max(4, 4 + labDepth);
+      const minPathBeforeInner = Math.max(22, Math.floor(spreadBase * (2.2 + labDepth * 0.48)));
 
-      const side = Math.floor(Math.random() * 4);
-      let x, y;
-      if (side === 0) { x = minX; y = cy; }
-      else if (side === 1) { x = cx; y = minY; }
-      else if (side === 2) { x = maxX; y = cy; }
-      else { x = cx; y = maxY; }
-      pushCell(x, y);
+      function scoreStep(current, prev, dir, target, preferredTurnDir, depthBias, pathLen) {
+        const nx = current[0] + dir[0];
+        const ny = current[1] + dir[1];
+        if (!inShell(nx, ny)) return -Infinity;
+        if (grid[ny][nx] !== WALL) return -Infinity;
+        if (labNeighborCount(nx, ny) > 1) return -Infinity;
+        if (wouldCauseCrowding(nx, ny, current)) return -Infinity;
 
-      let turnInset = 2;
-      let horizontalBias = 1 + Math.floor(Math.random() * 3);
-      let verticalBias = 1 + Math.floor(Math.random() * 3);
+        let score = Math.random() * 1.1;
 
-      while ((maxX - minX) > innerR * 2 && (maxY - minY) > innerR * 2) {
-        // Top edge
-        [x, y] = carveLine(x, y, maxX - horizontalBias, minY);
-        // Right edge
-        [x, y] = carveLine(x, y, maxX, maxY - verticalBias);
-        // Bottom edge
-        [x, y] = carveLine(x, y, minX + horizontalBias, maxY);
-        // Left edge, but intentionally leave a staggered inward gate
-        [x, y] = carveLine(x, y, minX, minY + turnInset + verticalBias);
+        const curDx = target[0] - current[0];
+        const curDy = target[1] - current[1];
+        const nextDx = target[0] - nx;
+        const nextDy = target[1] - ny;
+        const curManhattan = Math.abs(curDx) + Math.abs(curDy);
+        const nextManhattan = Math.abs(nextDx) + Math.abs(nextDy);
+        score += (curManhattan - nextManhattan) * targetPull;
 
-        minX += 2;
-        maxX -= 2;
-        minY += 2;
-        maxY -= 2;
+        if (prev) {
+          const lastDir = [current[0] - prev[0], current[1] - prev[1]];
+          if (dir[0] === lastDir[0] && dir[1] === lastDir[1]) score += sameDirBonus;
+          if (dir[0] === -lastDir[0] && dir[1] === -lastDir[1]) score -= 6.0;
+          const turn = lastDir[0] * dir[1] - lastDir[1] * dir[0];
+          if (turn === preferredTurnDir) score += 1.0 + labDepth * 0.08;
+        }
 
-        if (minX > maxX || minY > maxY) break;
+        const p = shellProgress(nx, ny);
+        if (depthBias === 'outer') {
+          if (p >= Math.min(0.82, 0.58 + labDepth * 0.04)) score += outerHoldBias;
+          if (p <= 0.38) score -= innerPenaltyBias;
+        } else if (depthBias === 'mid') {
+          if (p >= Math.max(0.20, 0.34 - labDepth * 0.02) && p <= Math.min(0.80, 0.68 + labDepth * 0.02)) score += midBandBonus;
+          if (p <= 0.18) score -= 1.0 + labDepth * 0.3;
+        } else if (depthBias === 'inner') {
+          if (pathLen < minPathBeforeInner) {
+            score -= 3.9 + labDepth * 0.7;
+            if (p <= 0.22) score -= 2.6 + labDepth * 0.45;
+          } else {
+            if (p <= 0.24) score += 1.8 + labDepth * 0.2;
+          }
+        }
 
-        // Step inward before the next lap so the route feels like one
-        // continuous winding commitment instead of detached boxes.
-        [x, y] = carveLine(x, y, minX + horizontalBias, minY);
+        if (Math.abs(nx - cx) > Math.abs(ny - cy)) score += 0.18 + labDepth * 0.03;
 
-        horizontalBias = 1 + ((horizontalBias + 1) % 3);
-        verticalBias = 1 + ((verticalBias + 2) % 3);
+        let future = 0;
+        for (const [fdx, fdy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const fx = nx + fdx;
+          const fy = ny + fdy;
+          if (!inShell(fx, fy)) continue;
+          if (!inBounds(fx, fy, w, h)) continue;
+          if (grid[fy][fx] === WALL) future++;
+        }
+        score += future * futureSpaceBonus;
+
+        return score;
       }
 
-      if (path.length === 0) {
-        pushCell(cx, cy - outerR);
+      function carveTowardTarget(path, start, target, preferredTurnDir, depthBias, maxSteps = 2400) {
+        let current = [start[0], start[1]];
+        let prev = path.length > 1 ? path[path.length - 2] : null;
+        let steps = 0;
+
+        while (steps < maxSteps) {
+          steps++;
+          if (Math.abs(current[0] - target[0]) + Math.abs(current[1] - target[1]) <= 1) break;
+
+          const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+          const ranked = dirs
+            .map(dir => ({
+              dir,
+              score: scoreStep(current, prev, dir, target, preferredTurnDir, depthBias, path.length)
+            }))
+            .filter(x => x.score > -Infinity)
+            .sort((a, b) => b.score - a.score);
+
+          if (!ranked.length) break;
+
+          const bandWidth = depthBias === 'inner' ? 0.85 : (1.0 + labDepth * 0.09);
+          const band = ranked.filter(r => r.score >= ranked[0].score - bandWidth);
+          const choice = band[Math.floor(Math.random() * band.length)];
+          const nx = current[0] + choice.dir[0];
+          const ny = current[1] + choice.dir[1];
+
+          carvePoint(path, nx, ny);
+          prev = current;
+          current = [nx, ny];
+        }
+
+        return current;
+      }
+
+      const startPool = outerCandidates();
+      const start = startPool[0] || [cx + outerRX - 2, cy];
+      const path = [];
+      carvePoint(path, start[0], start[1]);
+
+      const outerPool = shellCandidatesForBand(Math.min(0.86, 0.58 + labDepth * 0.04), 0.98);
+      const midPool = shellCandidatesForBand(Math.max(0.18, 0.32 - labDepth * 0.02), Math.min(0.80, 0.68 + labDepth * 0.02));
+      const innerPool = shellCandidatesForBand(0.04, Math.max(0.18, 0.28 - labDepth * 0.02));
+
+      const preferredTurnDir = Math.random() < 0.5 ? -1 : 1;
+      const waypoints = [];
+      let prior = start;
+      const spreadOuter = Math.max(12, Math.floor(spreadBase * (1.1 + labDepth * 0.08)));
+      const spreadMid = Math.max(8, Math.floor(spreadBase * (0.82 + labDepth * 0.05)));
+      const spreadInner = Math.max(5, Math.floor(spreadBase * (0.46 + labDepth * 0.025)));
+
+      const phasePattern = [];
+      for (let i = 0; i < minWaypointsBeforeInner; i++) {
+        if (i % 4 === 0 || i % 4 === 2) phasePattern.push({ pool: outerPool, bias: 'outer', spread: spreadOuter });
+        else phasePattern.push({ pool: midPool, bias: 'mid', spread: spreadMid });
+      }
+      phasePattern.push({ pool: midPool, bias: 'mid', spread: Math.max(7, spreadMid - 2) });
+      phasePattern.push({ pool: innerPool, bias: 'inner', spread: spreadInner });
+
+      for (const phase of phasePattern) {
+        const wp = pickSpreadWaypoint(phase.pool, prior, phase.spread);
+        if (wp) {
+          waypoints.push({ pt: wp, bias: phase.bias });
+          prior = wp;
+        }
+      }
+
+      const innerBoundaryPool = shellCandidatesForBand(0.00, 0.10)
+        .filter(([x, y]) => nearInnerBoundary(x, y));
+
+      const finalTarget = pickSpreadWaypoint(innerBoundaryPool, prior, Math.max(4, Math.floor(spreadBase * 0.35)))
+        || [cx, cy - innerRY];
+
+      let cursor = start;
+      for (const wp of waypoints) {
+        cursor = carveTowardTarget(path, cursor, wp.pt, preferredTurnDir, wp.bias, 3200 + labDepth * 350);
+      }
+      cursor = carveTowardTarget(path, cursor, finalTarget, preferredTurnDir, 'inner', 4600 + labDepth * 400);
+
+      if (path.length < Math.max(16, minPathBeforeInner * 0.55)) {
+        erasePath(path);
+
+        const fallback = [];
+        let x = start[0];
+        let y = start[1];
+        carvePoint(fallback, x, y);
+
+        const simpleTargets = [
+          [Math.max(2, cx - Math.floor(outerRX * 0.55)), y],
+          [Math.max(2, cx - Math.floor(outerRX * 0.55)), Math.min(h - 3, cy + Math.floor(outerRY * 0.55))],
+          [Math.min(w - 3, cx + Math.floor(outerRX * 0.45)), Math.min(h - 3, cy + Math.floor(outerRY * 0.40))],
+          [Math.min(w - 3, cx + Math.floor(outerRX * 0.32)), Math.max(2, cy - Math.floor(outerRY * 0.58))],
+          finalTarget
+        ];
+
+        let cur = [x, y];
+        for (const t of simpleTargets) {
+          cur = carveTowardTarget(fallback, cur, t, preferredTurnDir, 'mid', 2600 + labDepth * 220);
+        }
+
+        return {
+          entry: fallback[0],
+          exit: fallback[fallback.length - 1],
+          path: fallback
+        };
       }
 
       return {
@@ -478,6 +762,48 @@
         }
       }
       return cells;
+    }
+
+    function countTiles(ch) {
+      let n = 0;
+      for (let y = 0; y < grid.length; y++) {
+        for (let x = 0; x < grid[0].length; x++) {
+          if (grid[y][x] === ch) n++;
+        }
+      }
+      return n;
+    }
+
+    function evaluateLevelQuality(start, exit) {
+      const dist = bfsDistances(start, (x, y) => grid[y][x] !== WALL);
+      const exitDist = dist.get(key(exit[0], exit[1]));
+
+      if (exitDist == null) {
+        return { ok: false, score: -999999 };
+      }
+
+      const reachableCount = dist.size;
+      const labCount = countTiles(LAB);
+      const mazeCount = countTiles(MAZE);
+      const connCount = countTiles(CONN);
+
+      const minExitDist = Math.max(55, Math.floor((grid[0].length + grid.length) * 0.55));
+      const minReachable = Math.max(120, Math.floor((labCount + mazeCount + connCount) * 0.72));
+
+      const ok =
+        exitDist >= minExitDist &&
+        reachableCount >= minReachable &&
+        labCount >= 45 &&
+        mazeCount >= 25;
+
+      const score =
+        exitDist * 4 +
+        reachableCount * 1.5 +
+        labCount * 1.2 +
+        mazeCount * 0.8 +
+        connCount * 0.4;
+
+      return { ok, score };
     }
 
     function getNeighbors(x, y) {
@@ -588,48 +914,94 @@
     }
 
     function generateLevel() {
+      if (isSessionComplete) return;
       const { w, h, coreRadius } = sanitizeInputs();
 
-      grid = makeGrid(w, h, WALL);
-      const cx = Math.floor(w / 2);
-      const cy = Math.floor(h / 2);
-      const outerRadius = Math.min(cx, cy) - 2;
-      const coreSize = coreRadius * 2 + 1;
-      const coreX0 = cx - coreRadius;
-      const coreY0 = cy - coreRadius;
+      let bestSnapshot = null;
+      let bestScore = -Infinity;
 
-      // All surrounding rings are derived from available outer radius so they never
-      // extend off-screen or collapse into each other.
-      const labyrinthInner = coreRadius + 2;
-      const labyrinthOuter = Math.max(labyrinthInner + 2, Math.min(coreRadius + 8, outerRadius - 2));
-      const approachInnerRadius = Math.max(labyrinthOuter + 1, Math.min(labyrinthOuter + 4, outerRadius - 1));
+      for (let attempt = 0; attempt < 40; attempt++) {
+        grid = makeGrid(w, h, WALL);
 
-      const approach = carveRandomizedLabyrinth(grid, cx, cy, outerRadius, approachInnerRadius);
-      const labyrinth = carveLabyrinthRing(grid, cx, cy, labyrinthOuter, labyrinthInner);
-      carveConnector(grid, approach.innerGate, labyrinth.entry);
+        const cx = Math.floor(w / 2);
+        const cy = Math.floor(h / 2);
+        const outerRadius = Math.min(cx, cy) - 2;
+        const coreSize = coreRadius * 2 + 1;
+        const coreX0 = cx - coreRadius;
+        const coreY0 = cy - coreRadius;
 
-      carveMazeCore(grid, coreX0, coreY0, coreSize);
+        const labyrinthInner = coreRadius + 2;
+        const labDepth = getLabDepth();
+        const labyrinthOuter = Math.max(
+          labyrinthInner + 5,
+          Math.min(coreRadius + 10 + (labDepth * 3), outerRadius - 1)
+        );
+        const approachInnerRadius = Math.max(
+          labyrinthOuter + 1,
+          Math.min(labyrinthOuter + 4, outerRadius - 1)
+        );
 
-      const boundaryCandidates = findCoreBoundaryPoints(cx, cy, coreRadius)
-        .filter(([x, y]) => grid[y] && grid[y][x] === MAZE);
+        const approach = carveRandomizedLabyrinth(grid, cx, cy, outerRadius, approachInnerRadius);
+        const labyrinth = carveLabyrinthRing(grid, cx, cy, labyrinthOuter, labyrinthInner);
+        carveConnector(grid, approach.innerGate, labyrinth.entry);
 
-      const target = boundaryCandidates.length
-        ? boundaryCandidates[Math.floor(Math.random() * boundaryCandidates.length)]
-        : [cx, cy];
+        carveMazeCore(grid, coreX0, coreY0, coreSize);
 
-      carveConnector(grid, labyrinth.exit, target);
+        const boundaryCandidates = findCoreBoundaryPoints(cx, cy, coreRadius)
+          .filter(([x, y]) => grid[y] && grid[y][x] === MAZE);
 
-      const start = approach.start;
-      carveCell(grid, start[0], start[1], ENTRY);
+        const target = boundaryCandidates.length
+          ? boundaryCandidates[Math.floor(Math.random() * boundaryCandidates.length)]
+          : [cx, cy];
 
-      const coreCells = collectCoreCells();
-      const exit = (coreCells.length > 0)
-        ? (placeExitFarFromStart(coreCells, start) || coreCells[Math.floor(Math.random() * coreCells.length)])
-        : [cx, cy];
-      carveCell(grid, exit[0], exit[1], EXIT);
+        carveConnector(grid, labyrinth.exit, target);
 
-      mousePos = [...start];
-      explorerState = createExplorer(start, exit);
+        const start = approach.start;
+        carveCell(grid, start[0], start[1], ENTRY);
+
+        const coreCells = collectCoreCells();
+        const exit = (coreCells.length > 0)
+          ? (placeExitFarFromStart(coreCells, start) || coreCells[Math.floor(Math.random() * coreCells.length)])
+          : [cx, cy];
+        carveCell(grid, exit[0], exit[1], EXIT);
+
+        const quality = evaluateLevelQuality(start, exit);
+
+        if (quality.score > bestScore) {
+          bestScore = quality.score;
+          bestSnapshot = {
+            grid: grid.map(row => [...row]),
+            start: [...start],
+            exit: [...exit]
+          };
+        }
+
+        if (quality.ok) {
+          iterationCount++;
+          mousePos = [...start];
+          explorerState = createExplorer(start, exit);
+          lastResultEl.textContent = 'In Progress';
+          updateStats();
+          startMapTimer();
+          paintHtml();
+          return;
+        }
+      }
+
+      if (bestSnapshot) {
+        iterationCount++;
+        grid = bestSnapshot.grid.map(row => [...row]);
+        mousePos = [...bestSnapshot.start];
+        explorerState = createExplorer(bestSnapshot.start, bestSnapshot.exit);
+        lastResultEl.textContent = 'In Progress';
+        updateStats();
+        startMapTimer();
+        paintHtml();
+        return;
+      }
+
+      mousePos = null;
+      explorerState = null;
       paintHtml();
     }
 
@@ -641,6 +1013,15 @@
       return Math.max(8, delay);
     }
 
+    function completeSession(resultLabel) {
+      isSessionComplete = true;
+      finalizeRun(resultLabel);
+      runStatusEl.textContent = 'Complete';
+      lastResultEl.textContent = `${resultLabel} | Final`;
+      stopMapTimer();
+      paintHtml();
+    }
+
     async function runMouse() {
       const myRunId = ++currentRunId;
 
@@ -650,16 +1031,26 @@
         paintHtml();
 
         if (result === 'solved') {
-          await new Promise(r => setTimeout(r, 250));
-          if (myRunId !== currentRunId) return;
+          finalizeRun('Solved');
+          if (iterationCount >= MAX_ITERATIONS) {
+            completeSession('Solved');
+            return;
+          }
+          await new Promise(r => setTimeout(r, 700));
+          if (myRunId !== currentRunId || isSessionComplete) return;
           generateLevel();
           runMouse();
           return;
         }
 
         if (result === 'stuck' || result === 'finished') {
-          await new Promise(r => setTimeout(r, 250));
-          if (myRunId !== currentRunId) return;
+          finalizeRun(result === 'stuck' ? 'Stuck' : 'Finished');
+          if (iterationCount >= MAX_ITERATIONS) {
+            completeSession(result === 'stuck' ? 'Stuck' : 'Finished');
+            return;
+          }
+          await new Promise(r => setTimeout(r, 700));
+          if (myRunId !== currentRunId || isSessionComplete) return;
           generateLevel();
           runMouse();
           return;
@@ -670,8 +1061,16 @@
     }
 
     function restart() {
+      if (isSessionComplete || iterationCount >= MAX_ITERATIONS) {
+        isSessionComplete = false;
+      }
       currentRunId++;
+      stopMapTimer();
       generateLevel();
+      if (!explorerState) {
+        completeSession('No Valid Map');
+        return;
+      }
       runMouse();
     }
 
@@ -679,7 +1078,11 @@
     widthInput.addEventListener('change', sanitizeInputs);
     heightInput.addEventListener('change', sanitizeInputs);
     coreInput.addEventListener('change', sanitizeInputs);
+    labDepthInput.addEventListener('change', () => {
+      labDepthInput.value = getLabDepth();
+    });
     sanitizeInputs();
+    updateStats();
     restart();
   </script>
 </body>
